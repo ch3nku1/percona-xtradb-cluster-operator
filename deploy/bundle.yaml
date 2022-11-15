@@ -9002,6 +9002,17 @@ spec:
                             additionalProperties:
                               type: string
                             type: object
+                          azure:
+                            properties:
+                              container:
+                                type: string
+                              credentialsSecret:
+                                type: string
+                              endpointUrl:
+                                type: string
+                              storageClass:
+                                type: string
+                            type: object
                           containerSecurityContext:
                             properties:
                               allowPrivilegeEscalation:
@@ -9837,6 +9848,8 @@ spec:
                           format: int32
                           type: integer
                       type: object
+                    loadBalancerIP:
+                      type: string
                     loadBalancerSourceRanges:
                       items:
                         type: string
@@ -10007,6 +10020,12 @@ spec:
                       type: object
                     replicasExternalTrafficPolicy:
                       type: string
+                    replicasLoadBalancerIP:
+                      type: string
+                    replicasLoadBalancerSourceRanges:
+                      items:
+                        type: string
+                      type: array
                     replicasServiceAnnotations:
                       additionalProperties:
                         type: string
@@ -11608,6 +11627,14 @@ spec:
                           type: object
                       type: object
                   type: object
+                ignoreAnnotations:
+                  items:
+                    type: string
+                  type: array
+                ignoreLabels:
+                  items:
+                    type: string
+                  type: array
                 initImage:
                   type: string
                 logCollectorSecretName:
@@ -12347,6 +12374,8 @@ spec:
                           format: int32
                           type: integer
                       type: object
+                    loadBalancerIP:
+                      type: string
                     loadBalancerSourceRanges:
                       items:
                         type: string
@@ -14672,6 +14701,8 @@ spec:
                           format: int32
                           type: integer
                       type: object
+                    loadBalancerIP:
+                      type: string
                     loadBalancerSourceRanges:
                       items:
                         type: string
@@ -16663,7 +16694,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.8.0
+    controller-gen.kubebuilder.io/version: v0.9.0
   creationTimestamp: null
   name: perconaxtradbclusterbackups.pxc.percona.com
 spec:
@@ -16725,10 +16756,23 @@ spec:
               type: object
             status:
               properties:
+                azure:
+                  properties:
+                    container:
+                      type: string
+                    credentialsSecret:
+                      type: string
+                    endpointUrl:
+                      type: string
+                    storageClass:
+                      type: string
+                  type: object
                 completed:
                   format: date-time
                   type: string
                 destination:
+                  type: string
+                image:
                   type: string
                 lastscheduled:
                   format: date-time
@@ -16744,9 +16788,17 @@ spec:
                     region:
                       type: string
                   type: object
+                sslInternalSecretName:
+                  type: string
+                sslSecretName:
+                  type: string
                 state:
                   type: string
+                storage_type:
+                  type: string
                 storageName:
+                  type: string
+                vaultSecretName:
                   type: string
               type: object
           type: object
@@ -16754,18 +16806,12 @@ spec:
       storage: true
       subresources:
         status: {}
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: []
-  storedVersions: []
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.8.0
+    controller-gen.kubebuilder.io/version: v0.9.0
   creationTimestamp: null
   name: perconaxtradbclusterrestores.pxc.percona.com
 spec:
@@ -16812,10 +16858,23 @@ spec:
                   type: string
                 backupSource:
                   properties:
+                    azure:
+                      properties:
+                        container:
+                          type: string
+                        credentialsSecret:
+                          type: string
+                        endpointUrl:
+                          type: string
+                        storageClass:
+                          type: string
+                      type: object
                     completed:
                       format: date-time
                       type: string
                     destination:
+                      type: string
+                    image:
                       type: string
                     lastscheduled:
                       format: date-time
@@ -16831,19 +16890,40 @@ spec:
                         region:
                           type: string
                       type: object
+                    sslInternalSecretName:
+                      type: string
+                    sslSecretName:
+                      type: string
                     state:
                       type: string
+                    storage_type:
+                      type: string
                     storageName:
+                      type: string
+                    vaultSecretName:
                       type: string
                   type: object
                 pitr:
                   properties:
                     backupSource:
                       properties:
+                        azure:
+                          properties:
+                            container:
+                              type: string
+                            credentialsSecret:
+                              type: string
+                            endpointUrl:
+                              type: string
+                            storageClass:
+                              type: string
+                          type: object
                         completed:
                           format: date-time
                           type: string
                         destination:
+                          type: string
+                        image:
                           type: string
                         lastscheduled:
                           format: date-time
@@ -16859,9 +16939,17 @@ spec:
                             region:
                               type: string
                           type: object
+                        sslInternalSecretName:
+                          type: string
+                        sslSecretName:
+                          type: string
                         state:
                           type: string
+                        storage_type:
+                          type: string
                         storageName:
+                          type: string
+                        vaultSecretName:
                           type: string
                       type: object
                     date:
@@ -16892,12 +16980,6 @@ spec:
       storage: true
       subresources:
         status: {}
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: []
-  storedVersions: []
 ---
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
@@ -17071,6 +17153,8 @@ spec:
                   fieldPath: metadata.name
             - name: OPERATOR_NAME
               value: percona-xtradb-cluster-operator
+            - name: DISABLE_TELEMETRY
+              value: "false"
           image: perconalab/percona-xtradb-cluster-operator:main
           imagePullPolicy: Always
           livenessProbe:

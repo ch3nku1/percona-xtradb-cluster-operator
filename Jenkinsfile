@@ -13,12 +13,16 @@ void CreateCluster(String CLUSTER_SUFFIX) {
                 gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
                 gcloud config set project $GCP_PROJECT
                 gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone $GKERegion --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
-                gcloud container clusters create --zone $GKERegion $CLUSTER_NAME-${CLUSTER_SUFFIX} --cluster-version=1.21 --machine-type=n1-standard-4 --preemptible --num-nodes=\$NODES_NUM --network=jenkins-vpc --subnetwork=jenkins-${CLUSTER_SUFFIX} --no-enable-autoupgrade --cluster-ipv4-cidr=10.\$(( RANDOM % 250 )).\$(( RANDOM % 30 * 8 )).0/21 && \
+                gcloud container clusters create --zone $GKERegion $CLUSTER_NAME-${CLUSTER_SUFFIX} --cluster-version=1.21 --machine-type=n1-standard-4 --preemptible --num-nodes=\$NODES_NUM --network=jenkins-vpc --subnetwork=jenkins-${CLUSTER_SUFFIX} --no-enable-autoupgrade --cluster-ipv4-cidr=/21 && \
+                gcloud container clusters update $CLUSTER_NAME-${CLUSTER_SUFFIX} --update-labels delete-cluster-after-hours=6 --zone $GKERegion && \
                 kubectl create clusterrolebinding cluster-admin-binding --clusterrole cluster-admin --user jenkins@"$GCP_PROJECT".iam.gserviceaccount.com || ret_val=\$?
                 if [ \${ret_val} -eq 0 ]; then break; fi
                 ret_num=\$((ret_num + 1))
             done
-            if [ \${ret_num} -eq 15 ]; then exit 1; fi
+            if [ \${ret_num} -eq 15 ]; then
+                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone $GKERegion --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
+                exit 1
+            fi
         """
    }
 }
@@ -31,6 +35,33 @@ void ShutdownCluster(String CLUSTER_SUFFIX) {
             gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
             gcloud config set project $GCP_PROJECT
             gcloud container clusters delete --zone $GKERegion $CLUSTER_NAME-${CLUSTER_SUFFIX}
+        """
+   }
+}
+void DeleteOldClusters(String FILTER) {
+    withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
+        sh """
+            if [ -f $HOME/google-cloud-sdk/path.bash.inc ]; then
+                export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+                source $HOME/google-cloud-sdk/path.bash.inc
+                gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
+                gcloud config set project $GCP_PROJECT
+                for GKE_CLUSTER in \$(gcloud container clusters list --format='csv[no-heading](name)' --filter="$FILTER"); do
+                    GKE_CLUSTER_STATUS=\$(gcloud container clusters list --format='csv[no-heading](status)' --filter="\$GKE_CLUSTER")
+                    retry=0
+                    while [ "\$GKE_CLUSTER_STATUS" == "PROVISIONING" ]; do
+                        echo "Cluster \$GKE_CLUSTER is being provisioned, waiting before delete."
+                        sleep 10
+                        GKE_CLUSTER_STATUS=\$(gcloud container clusters list --format='csv[no-heading](status)' --filter="\$GKE_CLUSTER")
+                        let retry+=1
+                        if [ \$retry -ge 60 ]; then
+                            echo "Cluster \$GKE_CLUSTER to delete is being provisioned for too long. Skipping..."
+                            break
+                        fi
+                    done
+                    gcloud container clusters delete --async --zone $GKERegion --quiet \$GKE_CLUSTER || true
+                done
+            fi
         """
    }
 }
@@ -111,7 +142,7 @@ void setTestsresults() {
     }
 }
 
-void runTest(String TEST_NAME, String CLUSTER_SUFFIX, String MYSQL_VERSION, Integer TIMEOUT) {
+void runTest(String TEST_NAME, String CLUSTER_SUFFIX, String MYSQL_VERSION) {
     def retryCount = 0
     def testNameWithMysqlVersion = "$TEST_NAME-$MYSQL_VERSION".replace(".", "-")
     waitUntil {
@@ -122,7 +153,7 @@ void runTest(String TEST_NAME, String CLUSTER_SUFFIX, String MYSQL_VERSION, Inte
             testsReportMap["$testNameWithMysqlVersion"] = "[failed]($testUrl)"
             popArtifactFile("${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion")
 
-            timeout(time: TIMEOUT, unit: 'MINUTES') {
+            timeout(time: 90, unit: 'MINUTES') {
                 sh """
                     if [ -f "${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion" ]; then
                         echo Skip $TEST_NAME test
@@ -175,12 +206,15 @@ pipeline {
         OPERATOR_NS = 'pxc-operator'
         GIT_SHORT_COMMIT = sh(script: 'git describe --always --dirty', , returnStdout: true).trim()
         VERSION = "${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}"
-        CLUSTER_NAME = sh(script: "echo jenkins-pxc-${GIT_SHORT_COMMIT} | tr '[:upper:]' '[:lower:]'", , returnStdout: true).trim()
+        CLUSTER_NAME = sh(script: "echo jen-pxc-${env.CHANGE_ID}-${GIT_SHORT_COMMIT}-${env.BUILD_NUMBER} | tr '[:upper:]' '[:lower:]'", , returnStdout: true).trim()
         AUTHOR_NAME  = sh(script: "echo ${CHANGE_AUTHOR_EMAIL} | awk -F'@' '{print \$1}'", , returnStdout: true).trim()
         ENABLE_LOGGING="true"
     }
     agent {
         label 'docker'
+    }
+    options {
+        disableConcurrentBuilds(abortPrevious: true)
     }
     stages {
         stage('Prepare') {
@@ -227,6 +261,7 @@ pipeline {
                         cp $CLOUD_SECRET_FILE ./e2e-tests/conf/cloud-secret.yml
                     '''
                 }
+                DeleteOldClusters("jen-pxc-$CHANGE_ID")
             }
         }
         stage('Build docker image') {
@@ -329,97 +364,91 @@ pipeline {
                 stage('cluster1') {
                     steps {
                         CreateCluster('cluster1')
-                        runTest('upgrade-haproxy', 'cluster1', '8.0', 45)
-                        runTest('upgrade-proxysql', 'cluster1', '8.0', 45)
-                        runTest('demand-backup', 'cluster1', '8.0', 60)
-                        runTest('one-pod', 'cluster1', '8.0', 30)
+                        runTest('upgrade-haproxy', 'cluster1', '8.0')
+                        runTest('upgrade-proxysql', 'cluster1', '8.0')
+                        runTest('demand-backup', 'cluster1', '8.0')
+                        runTest('one-pod', 'cluster1', '8.0')
                         ShutdownCluster('cluster1')
                     }
                 }
                 stage('cluster2') {
                     steps {
                         CreateCluster('cluster2')
-                        runTest('smart-update1', 'cluster2', '8.0', 75)
-                        runTest('smart-update2', 'cluster2', '8.0', 45)
-                        runTest('demand-backup-encrypted-with-tls', 'cluster2', '8.0', 75)
+                        runTest('smart-update1', 'cluster2', '8.0')
+                        runTest('smart-update2', 'cluster2', '8.0')
+                        runTest('demand-backup-encrypted-with-tls', 'cluster2', '8.0')
                         ShutdownCluster('cluster2')
                     }
                 }
                 stage('cluster3') {
                     steps {
                         CreateCluster('cluster3')
-                        runTest('init-deploy', 'cluster3', '8.0', 40)
-                        runTest('limits', 'cluster3', '8.0', 30)
-                        runTest('monitoring-2-0', 'cluster3', '8.0', 30)
-                        runTest('haproxy', 'cluster3', '8.0', 50)
+                        runTest('haproxy', 'cluster3', '8.0')
+                        runTest('init-deploy', 'cluster3', '8.0')
+                        runTest('limits', 'cluster3', '8.0')
+                        runTest('monitoring-2-0', 'cluster3', '8.0')
                         ShutdownCluster('cluster3')
                     }
                 }
                 stage('cluster4') {
                     steps {
                         CreateCluster('cluster4')
-                        runTest('proxysql-sidecar-res-limits', 'cluster4', '8.0', 30)
-                        runTest('tls-issue-self','cluster4', '8.0', 25)
-                        runTest('tls-issue-cert-manager','cluster4', '8.0', 25)
-                        runTest('tls-issue-cert-manager-ref','cluster4', '8.0', 25)
-                        runTest('validation-hook','cluster4', '8.0', 10)
-                        runTest('auto-tuning', 'cluster4', '8.0', 30)
-                        runTest('demand-backup-cloud', 'cluster4', '8.0', 60)
+                        runTest('proxysql-sidecar-res-limits', 'cluster4', '8.0')
+                        runTest('tls-issue-self','cluster4', '8.0')
+                        runTest('tls-issue-cert-manager','cluster4', '8.0')
+                        runTest('tls-issue-cert-manager-ref','cluster4', '8.0')
+                        runTest('validation-hook','cluster4', '8.0')
+                        runTest('auto-tuning', 'cluster4', '8.0')
+                        runTest('demand-backup-cloud', 'cluster4', '8.0')
                         ShutdownCluster('cluster4')
                     }
                 }
                 stage('cluster5') {
                     steps {
                         CreateCluster('cluster5')
-                        runTest('scaling', 'cluster5', '8.0', 30)
-                        runTest('scaling-proxysql', 'cluster5', '8.0', 30)
-                        runTest('security-context', 'cluster5', '8.0', 50)
-                        runTest('users', 'cluster5', '5.7', 75)
+                        runTest('scaling', 'cluster5', '8.0')
+                        runTest('scaling-proxysql', 'cluster5', '8.0')
+                        runTest('security-context', 'cluster5', '8.0')
+                        runTest('users', 'cluster5', '5.7')
                         ShutdownCluster('cluster5')
                     }
                 }
                 stage('cluster6') {
                     steps {
                         CreateCluster('cluster6')
-                        runTest('storage', 'cluster6', '8.0', 30)
-                        runTest('upgrade-consistency', 'cluster6', '8.0', 50)
-                        runTest('proxy-protocol','cluster6', '8.0', 30)
-                        runTest('one-pod', 'cluster6', '5.7', 30)
+                        runTest('haproxy', 'cluster6', '5.7')
+                        runTest('storage', 'cluster6', '8.0')
+                        runTest('upgrade-consistency', 'cluster6', '8.0')
+                        runTest('proxy-protocol','cluster6', '8.0')
+                        runTest('one-pod', 'cluster6', '5.7')
                         ShutdownCluster('cluster6')
                     }
                 }
                 stage('cluster7') {
                     steps {
                         CreateCluster('cluster7')
-                        runTest('restore-to-encrypted-cluster', 'cluster7', '8.0', 50)
-                        runTest('pitr', 'cluster7', '8.0', 75)
-                        runTest('affinity', 'cluster7', '8.0', 20)
+                        runTest('restore-to-encrypted-cluster', 'cluster7', '8.0')
+                        runTest('pitr', 'cluster7', '8.0')
+                        runTest('affinity', 'cluster7', '8.0')
                         ShutdownCluster('cluster7')
                     }
                 }
                 stage('cluster8') {
                     steps {
                         CreateCluster('cluster8')
-                        runTest('scheduled-backup', 'cluster8', '8.0', 75)
-                        runTest('scheduled-backup', 'cluster8', '5.7', 75)
+                        runTest('scheduled-backup', 'cluster8', '8.0')
+                        runTest('scheduled-backup', 'cluster8', '5.7')
                         ShutdownCluster('cluster8')
                     }
                 }
                 stage('cluster9') {
                     steps {
                         CreateCluster('cluster9')
-                        runTest('cross-site', 'cluster9', '8.0', 50)
-                        runTest('recreate', 'cluster9', '8.0', 50)
-                        runTest('init-deploy', 'cluster9', '5.7', 40)
+                        runTest('cross-site', 'cluster9', '8.0')
+                        runTest('recreate', 'cluster9', '8.0')
+                        runTest('init-deploy', 'cluster9', '5.7')
+                        runTest('users', 'cluster9', '8.0')
                         ShutdownCluster('cluster9')
-                    }
-                }
-                stage('cluster10') {
-                    steps {
-                        CreateCluster('cluster10')
-                        runTest('users', 'cluster10', '8.0', 75)
-                        runTest('haproxy', 'cluster10', '5.7', 50)
-                        ShutdownCluster('cluster10')
                     }
                 }
             }
@@ -453,19 +482,12 @@ pipeline {
                     pullRequest.comment(TestsReport)
                 }
             }
-            withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
-                sh """
-                    if [ -f $HOME/google-cloud-sdk/path.bash.inc ]; then
-                        source $HOME/google-cloud-sdk/path.bash.inc
-                        gcloud auth activate-service-account --key-file \$CLIENT_SECRET_FILE
-                        gcloud config set project \$GCP_PROJECT
-                        gcloud container clusters list --format='csv[no-heading](name)' --filter $CLUSTER_NAME | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
-                    fi
-                    sudo docker system prune -fa
-                    sudo rm -rf ./*
-                    sudo rm -rf $HOME/google-cloud-sdk
-                """
-            }
+            DeleteOldClusters("$CLUSTER_NAME")
+            sh """
+                sudo docker system prune -fa
+                sudo rm -rf ./*
+                sudo rm -rf $HOME/google-cloud-sdk
+            """
             deleteDir()
         }
     }
