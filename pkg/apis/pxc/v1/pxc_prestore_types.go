@@ -69,6 +69,8 @@ const (
 	RestoreSucceeded    BcpRestoreStates = "Succeeded"
 )
 
+const AnnotationUnsafePITR = "percona.com/unsafe-pitr"
+
 func (cr *PerconaXtraDBClusterRestore) CheckNsetDefaults() error {
 	if cr.Spec.PXCCluster == "" {
 		return errors.New("pxcCluster can't be empty")
@@ -84,8 +86,4 @@ func (cr *PerconaXtraDBClusterRestore) CheckNsetDefaults() error {
 	}
 
 	return nil
-}
-
-func init() {
-	SchemeBuilder.Register(&PerconaXtraDBClusterRestore{}, &PerconaXtraDBClusterRestoreList{})
 }
